@@ -108,7 +108,7 @@ def metrics():
 
 
 def monitor_child(child_pid):
-    _pid, status = os.waitpid(child_pid)
+    _pid, status = os.waitpid(child_pid, 0)
     os.exit(status)
 
 
