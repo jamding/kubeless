@@ -15,13 +15,14 @@ mod = imp.load_source('function',
                       '/kubeless/%s.py' % os.getenv('MOD_NAME'))
 func = getattr(mod, os.getenv('FUNC_HANDLER'))
 func_port = os.getenv('FUNC_PORT', 8080)
+func_port_https = os.getenv('FUNC_PORT_HTTPS', 8090)
 certfile = os.getenv('CERT_FILE_PATH')
 keyfile = os.getenv('KEY_FILE_PATH')
 
 
+tls_enabled = certfile and keyfile
 # See https://github.com/bottlepy/bottle/issues/934
-class SSLCherryPyServer(bottle.ServerAdapter):
-
+class TlsServerAdapter(bottle.ServerAdapter):
     def run(self, handler):
         server = wsgi.Server((self.host, self.port), handler)
         server.ssl_adapter = BuiltinSSLAdapter(certfile, keyfile)
@@ -32,7 +33,6 @@ class SSLCherryPyServer(bottle.ServerAdapter):
         finally:
             server.stop()
 
-server = SSLCherryPyServer if certfile and keyfile else 'cherrypy'
 
 timeout = float(os.getenv('FUNC_TIMEOUT', 180))
 
@@ -107,6 +107,11 @@ def metrics():
     return prom.generate_latest(prom.REGISTRY)
 
 
+def monitor_child(child_pid):
+    _pid, status = os.waitpid(child_pid)
+    os.exit(status)
+
+
 if __name__ == '__main__':
     import logging
     import sys
@@ -115,4 +120,17 @@ if __name__ == '__main__':
         app,
         [logging.StreamHandler(stream=sys.stdout)],
         requestlogger.ApacheFormatter())
-    bottle.run(loggedapp, server=server, host='0.0.0.0', port=func_port)
+
+    # when TLS is enabled, create a separate process to listen on the https port
+    pid = os.fork()
+    if pid == 0:
+        if not tls_enabled:
+            logging.info("TLS is not enabled, only listening on HTTPS")
+            sys.exit(0)
+        bottle.run(loggedapp, server=TlsServerAdapter, host='0.0.0.0', port=func_port_https)
+    else:
+        if tls_enabled:
+            from threading import Thread
+            watch_child = Thread(target=monitor_child, args=(pid,))
+            watch_child.start()
+        bottle.run(loggedapp, server='cherrypy', host='0.0.0.0', port=func_port)
